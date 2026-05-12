@@ -1,0 +1,8 @@
+[
+  {
+    "id": "sales01",
+    "username": "sales01",
+    "displayName": "Sales 01",
+    "passwordHash": "generate-with-npm-run-create-user"
+  }
+]
