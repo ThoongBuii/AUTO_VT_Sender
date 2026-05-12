@@ -401,9 +401,6 @@ io.on("connection", (socket) => {
   socket.join(userRoom(user.id));
   socket.emit("auth", { authenticated: true, user: publicUser(user) });
   socket.emit("status", statusPayload(runtime));
-  initializeClient(user).catch((error) => {
-    emitLog(user.id, "error", `Khong khoi dong duoc WhatsApp: ${error.message}`);
-  });
 });
 
 app.get("/api/me", (req, res) => {
@@ -425,7 +422,6 @@ app.post("/api/login", async (req, res) => {
   }
 
   req.session.user = publicUser(user);
-  await initializeClient(req.session.user);
   res.json({ ok: true, user: req.session.user });
 });
 
@@ -461,7 +457,6 @@ app.post("/api/register", async (req, res) => {
   saveUsers(users);
 
   req.session.user = publicUser(user);
-  await initializeClient(req.session.user);
   res.status(201).json({ ok: true, user: req.session.user });
 });
 
@@ -736,10 +731,6 @@ app.post("/api/logout", requireAuth, async (req, res) => {
     runtime.contactNameCache.clear();
     emitStatus(req.session.user.id);
     res.json({ ok: true });
-
-    setTimeout(() => {
-      initializeClient(req.session.user, { force: true });
-    }, 1000);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

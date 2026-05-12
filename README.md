@@ -31,14 +31,14 @@ Hay doi/khong dung mat khau admin mac dinh khi deploy that.
 1. Bam **Dang ky** de tao tai khoan sales, hoac **Dang nhap** neu da co tai khoan.
 2. Mo WhatsApp tren dien thoai cua sales do.
 3. Vao **Thiet bi lien ket**.
-4. Quet ma QR hien tren giao dien web.
-5. Bam **Tai danh ba/chat** de chon nguoi nhan theo ten hoac so dien thoai.
-6. Hoac nhap danh sach so dien thoai thu cong, moi dong mot so.
-7. Nhap noi dung, chon file neu can.
-8. Bam **Gui tin nhan**.
+4. Bam **Tao QR moi / dang nhap lai** tren web khi can ket noi WhatsApp.
+5. Quet ma QR hien tren giao dien web.
+6. Bam **Tai danh ba/chat** de chon nguoi nhan theo ten hoac so dien thoai.
+7. Hoac nhap danh sach so dien thoai thu cong, moi dong mot so.
+8. Nhap noi dung, chon file neu can.
+9. Bam **Gui tin nhan**.
 
-Neu da bam **Dang xuat session**, ung dung se tu tao lai QR moi. Neu QR chua hien, bam
-**Tao QR moi / dang nhap lai**.
+De trang web vao nhanh hon tren Render Free, ung dung khong tu khoi dong WhatsApp/Puppeteer ngay sau khi dang nhap. WhatsApp chi khoi dong khi bam **Tao QR moi / dang nhap lai**.
 
 ## Ca nhan hoa noi dung
 

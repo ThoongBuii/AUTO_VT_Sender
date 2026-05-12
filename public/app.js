@@ -94,6 +94,7 @@ function humanStatus(state) {
     qr_required: "Cần quét QR",
     authenticated: "Đã xác thực",
     ready: "Sẵn sàng",
+    idle: "Chưa kết nối",
     auth_failure: "Lỗi đăng nhập",
     disconnected: "Mất kết nối",
     logged_out: "Đã đăng xuất",
@@ -272,6 +273,9 @@ function connectSocket() {
     if (!wasReady && chats.length === 0) {
       loadChats();
     }
+  } else if (payload.state === "idle" || payload.state === "logged_out") {
+    statusText.textContent = "Bấm “Tạo QR mới / đăng nhập lại” khi bạn cần kết nối WhatsApp.";
+    qrBox.innerHTML = '<p class="muted">WhatsApp chưa khởi động để trang tải nhanh hơn.</p>';
   } else {
     statusText.textContent = "Mở WhatsApp trên điện thoại > Thiết bị liên kết > Liên kết thiết bị để quét QR.";
     renderQr(payload.qr);
