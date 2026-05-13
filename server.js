@@ -10,6 +10,7 @@ const bcrypt = require("bcryptjs");
 const multer = require("multer");
 const QRCode = require("qrcode");
 const { Server } = require("socket.io");
+const puppeteer = require("puppeteer-core");
 const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 
 const PORT = process.env.PORT || 3000;
@@ -18,6 +19,7 @@ const UPLOAD_DIR = path.join(__dirname, "uploads");
 const LOG_DIR = path.join(__dirname, "logs");
 const USERS_FILE = path.join(__dirname, "users.json");
 const SESSION_SECRET = process.env.SESSION_SECRET || "change-this-secret-before-public-deploy";
+const ZALO_URL = "https://chat.zalo.me/";
 
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 fs.mkdirSync(LOG_DIR, { recursive: true });
@@ -118,13 +120,26 @@ function sanitizeClientId(userId) {
   return String(userId).replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
-function userRoom(userId) {
-  return `user:${userId}`;
+function normalizeChannel(channel) {
+  return channel === "zalo" ? "zalo" : "whatsapp";
 }
 
-function createRuntime(user) {
+function requestChannel(req) {
+  return normalizeChannel(req.body?.channel || req.query?.channel || req.session?.channel);
+}
+
+function runtimeKey(userId, channel) {
+  return `${normalizeChannel(channel)}:${userId}`;
+}
+
+function userRoom(userId, channel) {
+  return `user:${normalizeChannel(channel)}:${userId}`;
+}
+
+function createRuntime(user, channel = "whatsapp") {
   return {
     user,
+    channel: normalizeChannel(channel),
     client: null,
     clientState: "idle",
     latestQrDataUrl: null,
@@ -135,12 +150,13 @@ function createRuntime(user) {
   };
 }
 
-function getRuntime(user) {
-  if (!runtimes.has(user.id)) {
-    runtimes.set(user.id, createRuntime(user));
+function getRuntime(user, channel = "whatsapp") {
+  const key = runtimeKey(user.id, channel);
+  if (!runtimes.has(key)) {
+    runtimes.set(key, createRuntime(user, channel));
   }
 
-  return runtimes.get(user.id);
+  return runtimes.get(key);
 }
 
 function statusPayload(runtime) {
@@ -150,20 +166,21 @@ function statusPayload(runtime) {
     qr: runtime.latestQrDataUrl,
     activeJob: runtime.activeJob,
     user: publicUser(runtime.user),
+    channel: runtime.channel,
   };
 }
 
-function emitStatus(userId) {
-  const runtime = runtimes.get(userId);
+function emitStatus(userId, channel = "whatsapp") {
+  const runtime = runtimes.get(runtimeKey(userId, channel));
   if (!runtime) {
     return;
   }
 
-  io.to(userRoom(userId)).emit("status", statusPayload(runtime));
+  io.to(userRoom(userId, channel)).emit("status", statusPayload(runtime));
 }
 
-function emitLog(userId, level, message) {
-  io.to(userRoom(userId)).emit("log", { level, message });
+function emitLog(userId, channel, level, message) {
+  io.to(userRoom(userId, channel)).emit("log", { level, message });
 }
 
 function normalizePhone(rawPhone) {
@@ -191,7 +208,7 @@ function parseSelectedChatIds(input) {
   return String(input || "")
     .split(/[\n,;]+/)
     .map((item) => item.trim())
-    .filter((item) => /^\d+@c\.us$/.test(item));
+    .filter((item) => /^\d+@c\.us$/.test(item) || /^zalo:\d+$/.test(item));
 }
 
 function parseSelectedChatNames(input) {
@@ -280,19 +297,248 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function appendHistory(userId, entry) {
-  const file = path.join(LOG_DIR, `${sanitizeClientId(userId)}-send-history.jsonl`);
+function appendHistory(userId, channel, entry) {
+  const file = path.join(
+    LOG_DIR,
+    `${normalizeChannel(channel)}-${sanitizeClientId(userId)}-send-history.jsonl`,
+  );
   fs.appendFileSync(file, `${JSON.stringify(entry)}\n`, "utf8");
 }
 
+function findChromeExecutable() {
+  const candidates = [
+    process.env.PUPPETEER_EXECUTABLE_PATH,
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+  ].filter(Boolean);
+
+  return candidates.find((candidate) => fs.existsSync(candidate));
+}
+
+async function detectZaloReady(page) {
+  return page.evaluate(() => {
+    const bodyText = document.body?.innerText || "";
+    const hasComposer = Boolean(
+      document.querySelector('[contenteditable="true"], textarea, input[type="text"]'),
+    );
+    const hasLoginText = /quét mã|qr|đăng nhập|login/i.test(bodyText);
+    return hasComposer && !hasLoginText;
+  });
+}
+
+async function updateZaloScreenshot(userId, runtime) {
+  if (!runtime.client?.page) {
+    return;
+  }
+
+  const screenshot = await runtime.client.page.screenshot({
+    type: "png",
+    fullPage: false,
+    encoding: "base64",
+  });
+  runtime.latestQrDataUrl = `data:image/png;base64,${screenshot}`;
+  emitStatus(userId, runtime.channel);
+}
+
+async function initializeZaloClient(user, runtime) {
+  const executablePath = findChromeExecutable();
+  if (!executablePath) {
+    throw new Error("Khong tim thay Chrome/Chromium de chay Zalo Web.");
+  }
+
+  await destroyClient(runtime, user.id);
+
+  const userDataDir = path.join(
+    __dirname,
+    ".zalo_auth",
+    `session-${sanitizeClientId(user.id)}`,
+  );
+  fs.mkdirSync(userDataDir, { recursive: true });
+
+  const browser = await puppeteer.launch({
+    headless: true,
+    executablePath,
+    userDataDir,
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+  });
+  const page = await browser.newPage();
+  await page.setViewport({ width: 1280, height: 900 });
+  runtime.client = { browser, page };
+
+  page.on("close", () => {
+    runtime.clientState = "disconnected";
+    runtime.isClientReady = false;
+    runtime.isClientInitializing = false;
+    emitStatus(user.id, runtime.channel);
+  });
+
+  await page.goto(ZALO_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  await wait(2500);
+
+  if (await detectZaloReady(page).catch(() => false)) {
+    runtime.clientState = "ready";
+    runtime.isClientReady = true;
+    runtime.latestQrDataUrl = null;
+    runtime.isClientInitializing = false;
+    emitStatus(user.id, runtime.channel);
+    return;
+  }
+
+  runtime.clientState = "qr_required";
+  runtime.isClientReady = false;
+  runtime.isClientInitializing = false;
+  await updateZaloScreenshot(user.id, runtime);
+
+  const startedAt = Date.now();
+  const poll = setInterval(async () => {
+    if (!runtime.client?.page || runtime.isClientReady || Date.now() - startedAt > 180_000) {
+      clearInterval(poll);
+      return;
+    }
+
+    try {
+      if (await detectZaloReady(runtime.client.page)) {
+        runtime.clientState = "ready";
+        runtime.isClientReady = true;
+        runtime.latestQrDataUrl = null;
+        clearInterval(poll);
+        emitStatus(user.id, runtime.channel);
+      } else {
+        await updateZaloScreenshot(user.id, runtime);
+      }
+    } catch (error) {
+      clearInterval(poll);
+      emitLog(user.id, runtime.channel, "error", `Loi kiem tra Zalo: ${error.message}`);
+    }
+  }, 3000);
+}
+
+async function getZaloChats(runtime) {
+  const page = runtime.client?.page;
+  if (!page) {
+    return [];
+  }
+
+  const chats = await page.evaluate(() => {
+    const candidates = [...document.querySelectorAll('[role="listitem"], .conv-item, div')];
+    const seen = new Set();
+
+    return candidates
+      .map((element) => {
+        const text = (element.innerText || "").trim();
+        const rect = element.getBoundingClientRect();
+        return { text, top: rect.top, left: rect.left, width: rect.width, height: rect.height };
+      })
+      .filter((item) => {
+        if (!item.text || item.text.length > 120 || item.height < 24 || item.width < 120) {
+          return false;
+        }
+        if (/tin nhắn|danh bạ|khám phá|nhật ký|cloud|zalo/i.test(item.text)) {
+          return false;
+        }
+        if (seen.has(item.text)) {
+          return false;
+        }
+        seen.add(item.text);
+        return true;
+      })
+      .slice(0, 80)
+      .map((item, index) => ({
+        id: `zalo:${index}`,
+        name: item.text.split("\n")[0],
+        number: "Zalo",
+        source: "zalo",
+        timestamp: 0,
+      }));
+  });
+
+  for (const chat of chats) {
+    cacheContactName(runtime, chat.id, chat.name);
+  }
+
+  return chats;
+}
+
+async function selectZaloChatByName(runtime, name) {
+  const page = runtime.client?.page;
+  if (!page) {
+    throw new Error("Zalo page chua san sang.");
+  }
+
+  const clicked = await page.evaluate((targetName) => {
+    const normalizedTarget = targetName.toLowerCase();
+    const candidates = [...document.querySelectorAll('[role="listitem"], .conv-item, div')];
+    const element = candidates.find((item) =>
+      (item.innerText || "").trim().toLowerCase().includes(normalizedTarget),
+    );
+
+    if (!element) {
+      return false;
+    }
+
+    element.scrollIntoView({ block: "center" });
+    element.click();
+    return true;
+  }, name);
+
+  if (!clicked) {
+    throw new Error(`Khong tim thay chat Zalo: ${name}`);
+  }
+
+  await wait(1200);
+}
+
+async function sendZaloMessage(runtime, recipient, message, attachment) {
+  const page = runtime.client?.page;
+  if (!page) {
+    throw new Error("Zalo page chua san sang.");
+  }
+
+  await selectZaloChatByName(runtime, recipient.name || recipient.phone);
+
+  if (attachment) {
+    const tempFile = path.join(
+      UPLOAD_DIR,
+      `${Date.now()}-${attachment.originalname.replace(/[^a-zA-Z0-9_.-]/g, "_")}`,
+    );
+    fs.writeFileSync(tempFile, attachment.buffer);
+
+    const fileInput = await page.$('input[type="file"]');
+    if (!fileInput) {
+      fs.rm(tempFile, { force: true }, () => {});
+      throw new Error("Chua tim thay nut upload file tren Zalo Web.");
+    }
+
+    await fileInput.uploadFile(tempFile);
+    fs.rm(tempFile, { force: true }, () => {});
+    await wait(1200);
+  }
+
+  if (message) {
+    const composer = await page.$('[contenteditable="true"], textarea');
+    if (!composer) {
+      throw new Error("Chua tim thay khung nhap tin nhan Zalo.");
+    }
+
+    await composer.click();
+    await page.keyboard.type(message);
+    await page.keyboard.press("Enter");
+  }
+}
+
 function createClient(userId, runtime) {
+  const executablePath = findChromeExecutable();
   const puppeteerOptions = {
     headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
   };
 
-  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-    puppeteerOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+  if (executablePath) {
+    puppeteerOptions.executablePath = executablePath;
   }
 
   const nextClient = new Client({
@@ -307,7 +553,7 @@ function createClient(userId, runtime) {
     runtime.isClientReady = false;
     runtime.isClientInitializing = false;
     runtime.latestQrDataUrl = await QRCode.toDataURL(qr);
-    emitStatus(userId);
+    emitStatus(userId, runtime.channel);
   });
 
   nextClient.on("ready", () => {
@@ -315,12 +561,12 @@ function createClient(userId, runtime) {
     runtime.isClientReady = true;
     runtime.latestQrDataUrl = null;
     runtime.isClientInitializing = false;
-    emitStatus(userId);
+    emitStatus(userId, runtime.channel);
   });
 
   nextClient.on("authenticated", () => {
     runtime.clientState = "authenticated";
-    emitStatus(userId);
+    emitStatus(userId, runtime.channel);
   });
 
   nextClient.on("auth_failure", (message) => {
@@ -328,8 +574,8 @@ function createClient(userId, runtime) {
     runtime.isClientReady = false;
     runtime.latestQrDataUrl = null;
     runtime.isClientInitializing = false;
-    emitLog(userId, "error", `Dang nhap that bai: ${message}`);
-    emitStatus(userId);
+    emitLog(userId, runtime.channel, "error", `Dang nhap that bai: ${message}`);
+    emitStatus(userId, runtime.channel);
   });
 
   nextClient.on("disconnected", (reason) => {
@@ -337,8 +583,8 @@ function createClient(userId, runtime) {
     runtime.isClientReady = false;
     runtime.latestQrDataUrl = null;
     runtime.isClientInitializing = false;
-    emitLog(userId, "warn", `WhatsApp da ngat ket noi: ${reason}`);
-    emitStatus(userId);
+    emitLog(userId, runtime.channel, "warn", `WhatsApp da ngat ket noi: ${reason}`);
+    emitStatus(userId, runtime.channel);
   });
 
   return nextClient;
@@ -350,16 +596,20 @@ async function destroyClient(runtime, userId) {
   }
 
   try {
-    await runtime.client.destroy();
+    if (runtime.channel === "zalo") {
+      await runtime.client.browser?.close();
+    } else {
+      await runtime.client.destroy();
+    }
   } catch (error) {
-    emitLog(userId, "warn", `Khong destroy duoc client cu: ${error.message}`);
+    emitLog(userId, runtime.channel, "warn", `Khong destroy duoc client cu: ${error.message}`);
   } finally {
     runtime.client = null;
   }
 }
 
 async function initializeClient(user, options = {}) {
-  const runtime = getRuntime(user);
+  const runtime = getRuntime(user, options.channel);
   const force = Boolean(options.force);
 
   if (runtime.isClientInitializing) {
@@ -374,7 +624,19 @@ async function initializeClient(user, options = {}) {
   runtime.clientState = "starting";
   runtime.isClientReady = false;
   runtime.latestQrDataUrl = null;
-  emitStatus(user.id);
+  emitStatus(user.id, runtime.channel);
+
+  if (runtime.channel === "zalo") {
+    initializeZaloClient(user, runtime).catch((error) => {
+      runtime.clientState = "auth_failure";
+      runtime.isClientReady = false;
+      runtime.latestQrDataUrl = null;
+      runtime.isClientInitializing = false;
+      emitLog(user.id, runtime.channel, "error", `Khong khoi dong duoc Zalo: ${error.message}`);
+      emitStatus(user.id, runtime.channel);
+    });
+    return;
+  }
 
   await destroyClient(runtime, user.id);
   runtime.client = createClient(user.id, runtime);
@@ -383,13 +645,14 @@ async function initializeClient(user, options = {}) {
     runtime.isClientReady = false;
     runtime.latestQrDataUrl = null;
     runtime.isClientInitializing = false;
-    emitLog(user.id, "error", `Khong khoi dong duoc WhatsApp: ${error.message}`);
-    emitStatus(user.id);
+    emitLog(user.id, runtime.channel, "error", `Khong khoi dong duoc WhatsApp: ${error.message}`);
+    emitStatus(user.id, runtime.channel);
   });
 }
 
 io.on("connection", (socket) => {
   const user = socket.request.session?.user;
+  const channel = normalizeChannel(socket.request.session?.channel);
 
   if (!user) {
     socket.emit("auth", { authenticated: false });
@@ -397,8 +660,8 @@ io.on("connection", (socket) => {
     return;
   }
 
-  const runtime = getRuntime(user);
-  socket.join(userRoom(user.id));
+  const runtime = getRuntime(user, channel);
+  socket.join(userRoom(user.id, channel));
   socket.emit("auth", { authenticated: true, user: publicUser(user) });
   socket.emit("status", statusPayload(runtime));
 });
@@ -408,12 +671,17 @@ app.get("/api/me", (req, res) => {
     return res.status(401).json({ authenticated: false });
   }
 
-  res.json({ authenticated: true, user: publicUser(req.session.user) });
+  res.json({
+    authenticated: true,
+    user: publicUser(req.session.user),
+    channel: normalizeChannel(req.session.channel),
+  });
 });
 
 app.post("/api/login", async (req, res) => {
   const username = String(req.body.username || "").trim();
   const password = String(req.body.password || "");
+  const channel = requestChannel(req);
   const users = loadUsers();
   const user = users.find((item) => item.username === username);
 
@@ -422,13 +690,15 @@ app.post("/api/login", async (req, res) => {
   }
 
   req.session.user = publicUser(user);
-  res.json({ ok: true, user: req.session.user });
+  req.session.channel = channel;
+  res.json({ ok: true, user: req.session.user, channel });
 });
 
 app.post("/api/register", async (req, res) => {
   const username = String(req.body.username || "").trim();
   const password = String(req.body.password || "");
   const displayName = String(req.body.displayName || username).trim();
+  const channel = requestChannel(req);
 
   if (!username || !password) {
     return res.status(400).json({ error: "Vui long nhap username va password." });
@@ -457,7 +727,8 @@ app.post("/api/register", async (req, res) => {
   saveUsers(users);
 
   req.session.user = publicUser(user);
-  res.status(201).json({ ok: true, user: req.session.user });
+  req.session.channel = channel;
+  res.status(201).json({ ok: true, user: req.session.user, channel });
 });
 
 app.post("/api/app-logout", requireAuth, (req, res) => {
@@ -522,17 +793,22 @@ app.post("/api/admin/users", requireAuth, requireAdmin, async (req, res) => {
 });
 
 app.get("/api/status", requireAuth, (req, res) => {
-  res.json(statusPayload(getRuntime(req.session.user)));
+  res.json(statusPayload(getRuntime(req.session.user, requestChannel(req))));
 });
 
 app.get("/api/chats", requireAuth, async (req, res) => {
-  const runtime = getRuntime(req.session.user);
+  const runtime = getRuntime(req.session.user, requestChannel(req));
 
   if (!runtime.isClientReady || !runtime.client) {
-    return res.status(409).json({ error: "WhatsApp chua san sang. Hay quet QR truoc." });
+    return res.status(409).json({ error: `${runtime.channel === "zalo" ? "Zalo" : "WhatsApp"} chua san sang. Hay quet QR truoc.` });
   }
 
   try {
+    if (runtime.channel === "zalo") {
+      const chats = await getZaloChats(runtime);
+      return res.json({ chats });
+    }
+
     const [chats, contacts] = await Promise.all([
       runtime.client.getChats(),
       runtime.client.getContacts(),
@@ -596,10 +872,10 @@ app.get("/api/chats", requireAuth, async (req, res) => {
 });
 
 app.post("/api/send", requireAuth, upload.single("attachment"), async (req, res) => {
-  const runtime = getRuntime(req.session.user);
+  const runtime = getRuntime(req.session.user, requestChannel(req));
 
   if (!runtime.isClientReady || !runtime.client) {
-    return res.status(409).json({ error: "WhatsApp chua san sang. Hay quet QR truoc." });
+    return res.status(409).json({ error: `${runtime.channel === "zalo" ? "Zalo" : "WhatsApp"} chua san sang. Hay quet QR truoc.` });
   }
 
   if (runtime.activeJob) {
@@ -613,12 +889,15 @@ app.post("/api/send", requireAuth, upload.single("attachment"), async (req, res)
     shouldCheckRegistration: true,
   }));
   const selectedRecipients = parseSelectedChatIds(req.body.selectedChatIds).map((chatId) => ({
-    phone: chatId.replace("@c.us", ""),
+    phone: chatId.startsWith("zalo:") ? selectedChatNames[chatId] || chatId : chatId.replace("@c.us", ""),
     chatId,
     name: selectedChatNames[chatId],
     shouldCheckRegistration: false,
   }));
-  const recipients = [...phoneRecipients, ...selectedRecipients].filter(
+  const recipients = [
+    ...(runtime.channel === "zalo" ? [] : phoneRecipients),
+    ...selectedRecipients,
+  ].filter(
     (recipient, index, allRecipients) =>
       allRecipients.findIndex((item) => item.chatId === recipient.chatId) === index,
   );
@@ -641,7 +920,7 @@ app.post("/api/send", requireAuth, upload.single("attachment"), async (req, res)
     failed: 0,
     startedAt: new Date().toISOString(),
   };
-  emitStatus(req.session.user.id);
+  emitStatus(req.session.user.id, runtime.channel);
 
   res.json({
     ok: true,
@@ -675,6 +954,19 @@ app.post("/api/send", requireAuth, upload.single("attachment"), async (req, res)
     };
 
     try {
+      if (runtime.channel === "zalo") {
+        await sendZaloMessage(runtime, { ...recipient, name: recipientName }, personalizedMessage, attachment);
+        runtime.activeJob.sent += 1;
+        appendHistory(req.session.user.id, runtime.channel, { ...historyEntry, status: "success" });
+        emitLog(req.session.user.id, runtime.channel, "success", `Da gui toi ${recipientName}`);
+        emitStatus(req.session.user.id, runtime.channel);
+
+        if (runtime.activeJob.sent + runtime.activeJob.failed < runtime.activeJob.total) {
+          await wait(delayMs);
+        }
+        continue;
+      }
+
       if (shouldCheckRegistration) {
         const isRegistered = await withDetachedFrameRetry(() =>
           runtime.client.isRegisteredUser(chatId),
@@ -693,35 +985,35 @@ app.post("/api/send", requireAuth, upload.single("attachment"), async (req, res)
       }
 
       runtime.activeJob.sent += 1;
-      appendHistory(req.session.user.id, { ...historyEntry, status: "success" });
-      emitLog(req.session.user.id, "success", `Da gui toi ${recipientName} (${phone})`);
+      appendHistory(req.session.user.id, runtime.channel, { ...historyEntry, status: "success" });
+      emitLog(req.session.user.id, runtime.channel, "success", `Da gui toi ${recipientName} (${phone})`);
     } catch (error) {
       runtime.activeJob.failed += 1;
-      appendHistory(req.session.user.id, {
+      appendHistory(req.session.user.id, runtime.channel, {
         ...historyEntry,
         status: "failed",
         error: error.message,
       });
-      emitLog(req.session.user.id, "error", `Loi ${phone}: ${error.message}`);
+      emitLog(req.session.user.id, runtime.channel, "error", `Loi ${phone}: ${error.message}`);
     }
 
-    emitStatus(req.session.user.id);
+    emitStatus(req.session.user.id, runtime.channel);
 
     if (runtime.activeJob.sent + runtime.activeJob.failed < runtime.activeJob.total) {
       await wait(delayMs);
     }
   }
 
-  emitLog(req.session.user.id, "info", "Hoan tat chien dich gui.");
+  emitLog(req.session.user.id, runtime.channel, "info", "Hoan tat chien dich gui.");
   runtime.activeJob = null;
-  emitStatus(req.session.user.id);
+  emitStatus(req.session.user.id, runtime.channel);
 });
 
 app.post("/api/logout", requireAuth, async (req, res) => {
-  const runtime = getRuntime(req.session.user);
+  const runtime = getRuntime(req.session.user, requestChannel(req));
 
   try {
-    if (runtime.client) {
+    if (runtime.client && runtime.channel === "whatsapp") {
       await runtime.client.logout().catch(() => {});
     }
     await destroyClient(runtime, req.session.user.id);
@@ -729,7 +1021,7 @@ app.post("/api/logout", requireAuth, async (req, res) => {
     runtime.isClientReady = false;
     runtime.latestQrDataUrl = null;
     runtime.contactNameCache.clear();
-    emitStatus(req.session.user.id);
+    emitStatus(req.session.user.id, runtime.channel);
     res.json({ ok: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -738,7 +1030,7 @@ app.post("/api/logout", requireAuth, async (req, res) => {
 
 app.post("/api/reconnect", requireAuth, async (req, res) => {
   try {
-    await initializeClient(req.session.user, { force: true });
+    await initializeClient(req.session.user, { force: true, channel: requestChannel(req) });
     res.json({ ok: true });
   } catch (error) {
     res.status(500).json({ error: error.message });

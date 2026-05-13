@@ -9,11 +9,19 @@
   <body>
     <section id="loginView" class="login-view">
       <form id="loginForm" class="card login-card">
-        <p class="eyebrow">Private WhatsApp Sender</p>
-        <h1 id="authTitle">Đăng nhập WhatsApp Sender</h1>
+        <p class="eyebrow">Private Sender</p>
+        <h1 id="authTitle">Đăng nhập Sender</h1>
         <p id="authSubtitle" class="muted">
-          Mỗi người dùng có tài khoản riêng, QR WhatsApp riêng và lịch sử gửi riêng.
+          Chọn WhatsApp hoặc Zalo, mỗi người dùng có QR/session và lịch sử gửi riêng.
         </p>
+
+        <label>
+          Chọn App
+          <select id="channelSelect" name="channel">
+            <option value="whatsapp">WhatsApp</option>
+            <option value="zalo">Zalo</option>
+          </select>
+        </label>
 
         <div class="auth-tabs">
           <button id="loginTabBtn" class="active" type="button">Đăng nhập</button>
@@ -44,15 +52,15 @@
     <main class="shell" hidden>
       <section class="hero">
         <div>
-          <p class="eyebrow">WhatsApp Web Automation</p>
-          <h1>Gửi thông tin tự động qua WhatsApp</h1>
+          <p id="channelEyebrow" class="eyebrow">WhatsApp Web Automation</p>
+          <h1 id="channelTitle">Gửi thông tin tự động qua WhatsApp</h1>
           <p class="muted">
-            Quét QR bằng WhatsApp trên điện thoại, nhập danh sách số nhận, nội dung và gửi với độ trễ an toàn.
+            Quét QR, chọn người nhận, nhập nội dung và gửi với độ trễ an toàn.
           </p>
           <p id="userText" class="muted"></p>
         </div>
         <div class="hero-actions">
-          <button id="logoutBtn" class="secondary" type="button">Đăng xuất WhatsApp</button>
+          <button id="logoutBtn" class="secondary" type="button">Đăng xuất kênh</button>
           <button id="appLogoutBtn" class="secondary" type="button">Đăng xuất app</button>
         </div>
       </section>
@@ -91,7 +99,7 @@
           <div class="card-header">
             <div>
               <p class="eyebrow">Bước 1</p>
-              <h2>Kết nối WhatsApp</h2>
+              <h2 id="connectTitle">Kết nối WhatsApp</h2>
             </div>
             <span id="statusBadge" class="badge">Đang khởi động</span>
           </div>
@@ -99,7 +107,7 @@
             <p class="muted">Đang chờ mã QR...</p>
           </div>
           <button id="reconnectBtn" class="secondary reconnect-btn" type="button">Tạo QR mới / đăng nhập lại</button>
-          <p id="statusText" class="muted">Mở WhatsApp trên điện thoại và quét QR khi mã xuất hiện.</p>
+          <p id="statusText" class="muted">Mở app trên điện thoại và quét QR khi mã xuất hiện.</p>
         </article>
 
         <article class="card">
@@ -114,7 +122,7 @@
             <section class="recipient-picker">
               <div class="card-header compact">
                 <div>
-                  <p class="eyebrow">Chọn từ WhatsApp</p>
+                  <p id="recipientEyebrow" class="eyebrow">Chọn từ WhatsApp</p>
                   <h3>Danh bạ và chat</h3>
                 </div>
                 <button id="refreshChatsBtn" class="secondary small" type="button">Tải danh bạ/chat</button>

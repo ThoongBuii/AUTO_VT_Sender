@@ -9,8 +9,13 @@ const loginTabBtn = document.querySelector("#loginTabBtn");
 const registerTabBtn = document.querySelector("#registerTabBtn");
 const displayNameLabel = document.querySelector("#displayNameLabel");
 const authSubmitBtn = document.querySelector("#authSubmitBtn");
+const channelSelect = document.querySelector("#channelSelect");
 const appShell = document.querySelector(".shell");
 const userText = document.querySelector("#userText");
+const channelEyebrow = document.querySelector("#channelEyebrow");
+const channelTitle = document.querySelector("#channelTitle");
+const connectTitle = document.querySelector("#connectTitle");
+const recipientEyebrow = document.querySelector("#recipientEyebrow");
 const adminPanel = document.querySelector("#adminPanel");
 const createUserForm = document.querySelector("#createUserForm");
 const refreshUsersBtn = document.querySelector("#refreshUsersBtn");
@@ -36,15 +41,29 @@ const selectedChatNames = document.querySelector("#selectedChatNames");
 let isReady = false;
 let chats = [];
 let authMode = "login";
+let currentChannel = "whatsapp";
 const selectedChats = new Set();
+
+function channelName(channel = currentChannel) {
+  return channel === "zalo" ? "Zalo" : "WhatsApp";
+}
+
+function applyChannelText(channel = currentChannel) {
+  const name = channelName(channel);
+  channelEyebrow.textContent = `${name} Web Automation`;
+  channelTitle.textContent = `Gửi thông tin tự động qua ${name}`;
+  connectTitle.textContent = `Kết nối ${name}`;
+  recipientEyebrow.textContent = `Chọn từ ${name}`;
+  logoutBtn.textContent = `Đăng xuất ${name}`;
+}
 
 function setAuthMode(mode) {
   authMode = mode;
   const isRegister = mode === "register";
-  authTitle.textContent = isRegister ? "Đăng ký WhatsApp Sender" : "Đăng nhập WhatsApp Sender";
+  authTitle.textContent = isRegister ? "Đăng ký Sender" : "Đăng nhập Sender";
   authSubtitle.textContent = isRegister
-    ? "Tạo tài khoản riêng, sau đó tự quét QR WhatsApp của bạn."
-    : "Đăng nhập để dùng session WhatsApp riêng của bạn.";
+    ? "Tạo tài khoản riêng, sau đó tự quét QR của app bạn chọn."
+    : "Đăng nhập để dùng session riêng theo app bạn chọn.";
   displayNameLabel.hidden = !isRegister;
   authSubmitBtn.textContent = isRegister ? "Đăng ký" : "Đăng nhập";
   loginTabBtn.classList.toggle("active", !isRegister);
@@ -52,11 +71,13 @@ function setAuthMode(mode) {
   loginError.textContent = "";
 }
 
-function showApp(user) {
+function showApp(user, channel = currentChannel) {
+  currentChannel = channel || "whatsapp";
   loginView.hidden = true;
   appShell.hidden = false;
-  userText.textContent = `Đang đăng nhập: ${user.displayName || user.username}`;
+  userText.textContent = `Đang đăng nhập: ${user.displayName || user.username} · ${channelName()}`;
   adminPanel.hidden = user.role !== "admin";
+  applyChannelText();
 
   if (user.role === "admin") {
     loadUsers();
@@ -224,7 +245,7 @@ function renderChats() {
 
 async function loadChats() {
   if (!isReady) {
-    addLog("warn", "WhatsApp chưa sẵn sàng, hãy quét QR trước.");
+    addLog("warn", `${channelName()} chưa sẵn sàng, hãy quét QR trước.`);
     return;
   }
 
@@ -241,7 +262,7 @@ async function loadChats() {
 
     chats = result.chats || [];
     renderChats();
-    addLog("info", `Đã tải ${chats.length} contact/chat WhatsApp.`);
+    addLog("info", `Đã tải ${chats.length} contact/chat ${channelName()}.`);
   } catch (error) {
     chatList.innerHTML = `<p class="muted">${error.message}</p>`;
     addLog("error", error.message);
@@ -268,16 +289,19 @@ function connectSocket() {
   reconnectBtn.disabled = ["starting", "authenticated"].includes(payload.state);
 
   if (payload.ready) {
-    statusText.textContent = "WhatsApp đã sẵn sàng. Bạn có thể gửi tin nhắn.";
-    qrBox.innerHTML = '<p class="muted">Đã kết nối WhatsApp.</p>';
+    statusText.textContent = `${channelName()} đã sẵn sàng. Bạn có thể gửi tin nhắn.`;
+    qrBox.innerHTML = `<p class="muted">Đã kết nối ${channelName()}.</p>`;
     if (!wasReady && chats.length === 0) {
       loadChats();
     }
   } else if (payload.state === "idle" || payload.state === "logged_out") {
-    statusText.textContent = "Bấm “Tạo QR mới / đăng nhập lại” khi bạn cần kết nối WhatsApp.";
-    qrBox.innerHTML = '<p class="muted">WhatsApp chưa khởi động để trang tải nhanh hơn.</p>';
+    statusText.textContent = `Bấm “Tạo QR mới / đăng nhập lại” khi bạn cần kết nối ${channelName()}.`;
+    qrBox.innerHTML = `<p class="muted">${channelName()} chưa khởi động để trang tải nhanh hơn.</p>`;
   } else {
-    statusText.textContent = "Mở WhatsApp trên điện thoại > Thiết bị liên kết > Liên kết thiết bị để quét QR.";
+    statusText.textContent =
+      currentChannel === "zalo"
+        ? "Mở Zalo trên điện thoại và quét QR/screenshot đang hiển thị."
+        : "Mở WhatsApp trên điện thoại > Thiết bị liên kết > Liên kết thiết bị để quét QR.";
     renderQr(payload.qr);
   }
 
@@ -299,7 +323,7 @@ async function checkSession() {
       return;
     }
 
-    showApp(result.user);
+    showApp(result.user, result.channel);
     connectSocket();
   } catch {
     showLogin();
@@ -319,6 +343,7 @@ loginForm.addEventListener("submit", async (event) => {
         username: formData.get("username"),
         password: formData.get("password"),
         displayName: formData.get("displayName"),
+        channel: formData.get("channel"),
       }),
     });
     const result = await response.json();
@@ -328,7 +353,7 @@ loginForm.addEventListener("submit", async (event) => {
     }
 
     loginForm.reset();
-    showApp(result.user);
+    showApp(result.user, result.channel);
     connectSocket();
   } catch (error) {
     loginError.textContent = error.message;
@@ -374,7 +399,7 @@ chatSearch.addEventListener("input", renderChats);
 
 reconnectBtn.addEventListener("click", async () => {
   reconnectBtn.disabled = true;
-  addLog("info", "Đang tạo QR đăng nhập mới...");
+  addLog("info", `Đang tạo QR đăng nhập ${channelName()} mới...`);
 
   try {
     const response = await fetch("/api/reconnect", { method: "POST" });
@@ -413,7 +438,7 @@ sendForm.addEventListener("submit", async (event) => {
 });
 
 logoutBtn.addEventListener("click", async () => {
-  if (!confirm("Dang xuat session WhatsApp tren may nay?")) {
+  if (!confirm(`Dang xuat session ${channelName()} tren may nay?`)) {
     return;
   }
 
@@ -425,7 +450,7 @@ logoutBtn.addEventListener("click", async () => {
       throw new Error(result.error || "Khong dang xuat duoc.");
     }
 
-    addLog("info", "Da dang xuat session WhatsApp.");
+    addLog("info", `Da dang xuat session ${channelName()}.`);
   } catch (error) {
     addLog("error", error.message);
   }
